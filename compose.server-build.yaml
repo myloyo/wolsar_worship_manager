@@ -1,0 +1,11 @@
+services:
+  api:
+    build: ./backend
+  frontend:
+    build: ./frontend
+  push-worker:
+    build: ./backend
+  bot:
+    build:
+      context: .
+      dockerfile: bot_service/Dockerfile

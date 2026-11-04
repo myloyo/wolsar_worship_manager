@@ -1,0 +1,44 @@
+name: Deploy
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Published image commit SHA (or main)
+        required: true
+        default: main
+permissions:
+  contents: read
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          test -n "$SSH_KEY"
+          test -n "$KNOWN_HOSTS"
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+      - name: Deploy published images
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          [[ "$IMAGE_TAG" =~ ^[a-zA-Z0-9_.-]+$ ]]
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9.-]+$ ]]
+          [[ "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p /opt/worship_bot/deploy"
+          scp deploy/Caddyfile "$DEPLOY_USER@$DEPLOY_HOST:/opt/worship_bot/deploy/Caddyfile"
+          scp deploy/deploy.sh "$DEPLOY_USER@$DEPLOY_HOST:/opt/worship_bot/deploy/deploy.sh"
+          scp compose.production.yaml "$DEPLOY_USER@$DEPLOY_HOST:/opt/worship_bot/compose.production.yaml"
+          ssh "$DEPLOY_USER@$DEPLOY_HOST" "bash /opt/worship_bot/deploy/deploy.sh '$IMAGE_TAG'"

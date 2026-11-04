@@ -1,0 +1,112 @@
+name: CI and images
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  publish-safety:
+    name: Check committed files for secrets and runtime data
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python deploy/check_publish.py
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate production configuration
+        run: |
+          cp deploy/env.production.example .env
+          TELEGRAM_BOT_TOKEN=ci-placeholder docker compose -f compose.production.yaml config --quiet
+          TELEGRAM_BOT_TOKEN=ci-placeholder docker compose -f compose.production.yaml -f compose.server-build.yaml config --quiet
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: worship_test
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: ci_only_password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ci_user -d worship_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://ci_user:ci_only_password@localhost:5432/worship_test
+      TEST_DATABASE_URL: postgresql+asyncpg://ci_user:ci_only_password@localhost:5432/worship_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install poetry==2.3.3
+      - run: poetry install --with dev --no-interaction
+      - run: poetry run ruff check --config pyproject.toml worship_bot tests migrations ../bot_service ../deploy
+      - run: poetry run ruff format --check --config pyproject.toml worship_bot tests migrations ../bot_service ../deploy
+      - run: poetry run mypy
+      - run: poetry run alembic upgrade head
+      - run: poetry run pytest -q
+      - run: poetry run alembic check
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm test
+      - run: npm run build
+  images:
+    needs: [backend, frontend, compose, publish-safety]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - name: backend
+            context: backend
+            file: backend/Dockerfile
+          - name: frontend
+            context: frontend
+            file: frontend/Dockerfile
+          - name: bot
+            context: .
+            file: bot_service/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image prefix
+        run: echo "PREFIX=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: true
+          tags: ${{ env.PREFIX }}/${{ matrix.name }}:main,${{ env.PREFIX }}/${{ matrix.name }}:${{ github.sha }}
