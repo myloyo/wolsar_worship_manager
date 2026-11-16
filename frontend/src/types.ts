@@ -56,6 +56,7 @@ export type PlannedEvent = {
   starts_at: string;
   additional_info: string | null;
   assignments: { ministry_role_id: number; user_ministry_role_id: number }[];
+  extra_role_ids?: number[];
 };
 export type Proposal = {
   reply: string;

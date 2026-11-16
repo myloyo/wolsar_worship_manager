@@ -43,6 +43,8 @@ async def test_planner_uses_responses_with_structured_output(
     assert captured[0]["store"] is False
     assert captured[0]["text"]["format"]["strict"] is True
     assert captured[0]["text"]["format"]["schema"]["additionalProperties"] is False
+    event_schema = captured[0]["text"]["format"]["schema"]["$defs"]["PlannedEvent"]
+    assert set(event_schema["required"]) == set(event_schema["properties"])
 
 
 @pytest.mark.parametrize(

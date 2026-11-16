@@ -5,14 +5,25 @@ from zoneinfo import ZoneInfo
 from worship_bot.domain.planning import ScheduleProposal
 
 
+def choose_assignment_slot(slots: dict[int, int | None], user_role_id: int) -> int:
+    assigned = next((number for number, owner in slots.items() if owner == user_role_id), None)
+    if assigned is not None:
+        return assigned
+    return min(
+        (number for number, owner in slots.items() if owner is None),
+        default=max(slots, default=0) + 1,
+    )
+
+
 def validate_proposal(
     proposal: ScheduleProposal,
     month: str,
     members: list[dict[str, Any]],
     existing_events: list[dict[str, Any]],
+    role_ids: set[int] | None = None,
 ) -> None:
     role_owners = {
-        role["user_ministry_role_id"]: (member["id"], role["id"])
+        role["user_ministry_role_id"]: (member, role["id"])
         for member in members
         for role in member["roles"]
     }
@@ -34,13 +45,19 @@ def validate_proposal(
             ):
                 raise ValueError("Изменение даты существующего события не поддерживается")
             seen_events.add(event.existing_event_id)
+        if event.extra_role_ids and (
+            role_ids is None or not set(event.extra_role_ids).issubset(role_ids)
+        ):
+            raise ValueError(f"В событии «{event.event_name}» указана роль, которой нет в служении")
         people: set[int] = set()
-        roles: set[int] = set()
         for assignment in event.assignments:
             owner = role_owners.get(assignment.user_ministry_role_id)
             if owner is None or owner[1] != assignment.ministry_role_id:
                 raise ValueError("Участник не имеет указанной роли в служении")
-            if owner[0] in people or assignment.ministry_role_id in roles:
-                raise ValueError("Повторяется участник или роль в одном событии")
-            people.add(owner[0])
-            roles.add(assignment.ministry_role_id)
+            member = owner[0]
+            if member["id"] in people:
+                name = f"{member.get('name', '')} {member.get('surname', '')}".strip()
+                raise ValueError(
+                    f"В событии «{event.event_name}» повторяется участник {name or member['id']}"
+                )
+            people.add(member["id"])

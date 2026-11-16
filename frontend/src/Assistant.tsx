@@ -36,6 +36,7 @@ export default function Assistant({
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
+  const [roles, setRoles] = useState<{ id: number; name: string }[]>([]);
   const [notice, contextHolder] = message.useMessage();
   useEffect(() => {
     if (demo) return;
@@ -45,6 +46,13 @@ export default function Assistant({
     )
       .then((latest) => {
         if (active) setSession(latest);
+      })
+      .catch((error) => notice.error((error as Error).message));
+    void api<{ id: number; name: string }[]>(
+      `/portal/ministries/${ministryId}/roles`,
+    )
+      .then((catalog) => {
+        if (active) setRoles(catalog);
       })
       .catch((error) => notice.error((error as Error).message));
     return () => {
@@ -107,6 +115,11 @@ export default function Assistant({
     );
     return person ? `${person.name} ${person.surname}` : `Участник #${id}`;
   };
+  const roleNameFor = (id: number) =>
+    roles.find((role) => role.id === id)?.name ??
+    members.flatMap((member) => member.roles).find((role) => role.id === id)
+      ?.name ??
+    `Роль #${id}`;
   return (
     <aside className="assistant panel">
       {contextHolder}
@@ -139,16 +152,6 @@ export default function Assistant({
           }}
         />
       </div>
-      {failure && (
-        <Alert
-          type="error"
-          showIcon
-          message={failure}
-          closable
-          onClose={() => setFailure("")}
-          style={{ margin: 16 }}
-        />
-      )}
       <div className="chat-body" aria-live="polite">
         {!session?.messages.length && (
           <>
@@ -222,11 +225,18 @@ export default function Assistant({
                 </b>
                 <p>
                   {event.assignments
-                    .map((assignment) =>
-                      nameFor(assignment.user_ministry_role_id),
+                    .map(
+                      (assignment) =>
+                        `${roleNameFor(assignment.ministry_role_id)} — ${nameFor(assignment.user_ministry_role_id)}`,
                     )
                     .join(", ") || "Без назначений"}
                 </p>
+                {!!event.extra_role_ids?.length && (
+                  <p>
+                    Новые места без назначения:{" "}
+                    {event.extra_role_ids.map(roleNameFor).join(", ")}
+                  </p>
+                )}
               </div>
             ))}
             {session.proposal.events.length > 0 && (
@@ -250,6 +260,16 @@ export default function Assistant({
         )}
       </div>
       <div className="chat-compose">
+        {failure && (
+          <Alert
+            type="error"
+            showIcon
+            message={failure}
+            closable
+            onClose={() => setFailure("")}
+            style={{ marginBottom: 12 }}
+          />
+        )}
         <Input.TextArea
           value={input}
           onChange={(event) => setInput(event.target.value)}

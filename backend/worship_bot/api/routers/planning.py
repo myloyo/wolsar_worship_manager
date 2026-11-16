@@ -94,7 +94,13 @@ async def chat(
             {"role": "user", "content": payload.message},
         ]
         proposal = await generate_proposal(settings, context, messages, record.attachments)
-        validate_proposal(proposal, record.month, context["members"], context["events"])
+        validate_proposal(
+            proposal,
+            record.month,
+            context["members"],
+            context["events"],
+            {role["id"] for role in context["roles"]},
+        )
         record.messages = [*messages, {"role": "assistant", "content": proposal.model_dump_json()}]
         record.proposal = proposal.model_dump(mode="json")
         record.revision += 1

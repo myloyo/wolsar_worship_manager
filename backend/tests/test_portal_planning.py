@@ -793,6 +793,87 @@ async def test_apply_creates_assignments_and_notifications(
     assert await portal_session.scalar(select(func.count()).select_from(NotificationJobRecord)) == 1
 
 
+@pytest.mark.parametrize("event_state", ["new", "empty", "occupied"])
+async def test_assistant_fills_two_back_vocal_slots(
+    portal_session: AsyncSession,
+    portal_http: AsyncClient,
+    proposal: ScheduleProposal,
+    monkeypatch: pytest.MonkeyPatch,
+    event_state: str,
+) -> None:
+    # Arrange
+    role = await portal_session.get(MinistryRoleRecord, 1)
+    assert role is not None
+    role.code = "back_vocal"
+    role.name = "Бэк-вокал"
+    portal_session.add(
+        MinistryRoleRecord(id=2, church_ministry_id=1, name="Скрипка", code="violin")
+    )
+    portal_session.add(
+        UserMinistryRoleRecord(
+            id=2, church_membership_id=1, ministry_membership_id=1, ministry_role_id=1
+        )
+    )
+    planned = proposal.events[0]
+    planned.assignments.append(PlannedAssignment(ministry_role_id=1, user_ministry_role_id=2))
+    planned.extra_role_ids.append(2)
+    if event_state != "new":
+        event = EventRecord(
+            church_id=1,
+            church_ministry_id=1,
+            event_name=planned.event_name,
+            event_date=planned.starts_at,
+        )
+        portal_session.add(event)
+        await portal_session.flush()
+        planned.existing_event_id = event.id
+        if event_state == "occupied":
+            portal_session.add(
+                EventRoleSlotRecord(
+                    event_id=event.id,
+                    ministry_role_id=1,
+                    slot_number=1,
+                    user_ministry_role_id=2,
+                    confirmation_status="confirmed",
+                )
+            )
+    await portal_session.commit()
+    record = await SqlPlanningRepository(portal_session).create(1, 1, "2026-11")
+    ticket = await SqlPortalRepository(portal_session).issue_login(1)
+    await portal_http.post("/api/v1/auth/exchange", json={"code": ticket.code})
+
+    async def generate(*args: object) -> ScheduleProposal:
+        return proposal
+
+    monkeypatch.setattr("worship_bot.api.routers.planning.generate_proposal", generate)
+    url = f"/api/v1/portal/assistant/sessions/{record.id}"
+
+    # Act
+    draft = await portal_http.post(f"{url}/messages", json={"message": "Два бэк-вокала"})
+    assert draft.status_code == 200, draft.text
+    assert draft.json()["proposal"]["events"][0]["extra_role_ids"] == [2]
+    assert await portal_session.scalar(select(func.count()).select_from(EventRoleSlotRecord)) == (
+        1 if event_state == "occupied" else 0
+    )
+    applied = await portal_http.post(f"{url}/apply", json={"revision": draft.json()["revision"]})
+
+    # Assert
+    assert applied.status_code == 200, applied.text
+    slots = list(
+        await portal_session.scalars(
+            select(EventRoleSlotRecord)
+            .where(EventRoleSlotRecord.event_id == applied.json()["event_ids"][0])
+            .order_by(EventRoleSlotRecord.ministry_role_id, EventRoleSlotRecord.slot_number)
+        )
+    )
+    assert [(slot.slot_number, slot.user_ministry_role_id) for slot in slots[:2]] == (
+        [(1, 2), (2, 1)] if event_state == "occupied" else [(1, 1), (2, 2)]
+    )
+    assert len(slots) == 3
+    assert slots[2].ministry_role_id == 2 and slots[2].user_ministry_role_id is None
+    assert slots[0].confirmation_status == ("confirmed" if event_state == "occupied" else "pending")
+
+
 async def test_invalid_proposal_does_not_write_events(
     portal_session: AsyncSession, proposal: ScheduleProposal
 ) -> None:

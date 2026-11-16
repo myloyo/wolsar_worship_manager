@@ -32,6 +32,14 @@ async def generate_proposal(
         "Сообщай о нераспознанных именах и недостатке истории в warnings. "
         "Для заполнения событий используй existing_event_id. Занятые роли не меняй. "
         "Для новых событий existing_event_id=null. Даты с часовым поясом. "
+        "У роли может быть несколько мест, например два бэк-вокала. "
+        "Используй role_slots для существующих событий и default_role_slots для новых. "
+        "Если роли нет в составе события или все её места заняты, всё равно включай "
+        "подходящее назначение в assignments: при применении будет создано новое место. "
+        "Для дополнительных пустых мест указывай ID ролей из roles в extra_role_ids, "
+        "по одному ID на каждое место. Для назначений достаточно assignments. "
+        "Не проси пользователя вручную добавлять места, которые можно включить в черновик. "
+        "Каждое место занимает отдельный участник; не назначай одного человека дважды на событие. "
         "При нехватке информации задай вопрос и верни events=[]. "
         "reply объясняет решение. Контекст системы: "
         + json.dumps(context, ensure_ascii=False, default=str)
@@ -60,7 +68,7 @@ async def generate_proposal(
                             "type": "json_schema",
                             "name": "schedule_proposal",
                             "strict": True,
-                            "schema": ScheduleProposal.model_json_schema(),
+                            "schema": ScheduleProposal.model_json_schema(mode="serialization"),
                         }
                     },
                 },

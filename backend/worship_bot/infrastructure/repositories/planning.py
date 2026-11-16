@@ -8,7 +8,7 @@ from dateutil.relativedelta import relativedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from worship_bot.application.services.planning import validate_proposal
+from worship_bot.application.services.planning import choose_assignment_slot, validate_proposal
 from worship_bot.domain.planning import ScheduleProposal
 from worship_bot.infrastructure.models import (
     ChurchMinistryRecord,
@@ -19,6 +19,7 @@ from worship_bot.infrastructure.models import (
 from worship_bot.infrastructure.models.portal import AssistantSessionRecord
 from worship_bot.infrastructure.notification_queue import queue_event_reminders
 from worship_bot.infrastructure.repositories.events import SqlEventCalendarRepository
+from worship_bot.infrastructure.repositories.ministries import SqlMinistryRepository
 from worship_bot.infrastructure.repositories.portal import SqlPortalRepository
 
 
@@ -33,7 +34,10 @@ class SqlPlanningRepository:
             asdict(member)
             for member in await SqlPortalRepository(self.session).members(ministry_id)
         ]
-        calendar = await SqlEventCalendarRepository(self.session).list_calendar_events(
+        calendar_repository = SqlEventCalendarRepository(self.session)
+        defaults = await calendar_repository.default_role_slots(ministry_id)
+        roles = await SqlMinistryRepository(self.session).list_roles(ministry_id)
+        calendar = await calendar_repository.list_calendar_events(
             start - relativedelta(months=2), end, ministry_id
         )
         events: list[dict[str, Any]] = []
@@ -57,6 +61,8 @@ class SqlPlanningRepository:
             "month": month,
             "timezone": "Europe/Saratov",
             "members": members,
+            "roles": [{"id": role.id, "name": role.name} for role in roles],
+            "default_role_slots": [asdict(slot) for slot in defaults],
             "history": [
                 event for event in events if datetime.fromisoformat(event["starts_at"]) < start
             ],
@@ -108,7 +114,13 @@ class SqlPlanningRepository:
             raise LookupError("Служение не найдено")
         context = await self.context(ministry.id, record.month)
         proposal = ScheduleProposal.model_validate(record.proposal)
-        validate_proposal(proposal, record.month, context["members"], context["events"])
+        validate_proposal(
+            proposal,
+            record.month,
+            context["members"],
+            context["events"],
+            {role["id"] for role in context["roles"]},
+        )
         if not proposal.events:
             raise ValueError("В черновике нет событий")
         role_users = {
@@ -135,16 +147,13 @@ class SqlPlanningRepository:
                 )
                 self.session.add(event)
                 await self.session.flush()
-                defaults = await SqlEventCalendarRepository(self.session).default_role_slots(
-                    ministry.id
-                )
                 self.session.add_all(
                     EventRoleSlotRecord(
                         event_id=event.id,
-                        ministry_role_id=slot.ministry_role_id,
-                        slot_number=slot.slot_number,
+                        ministry_role_id=slot["ministry_role_id"],
+                        slot_number=slot["slot_number"],
                     )
-                    for slot in defaults
+                    for slot in context["default_role_slots"]
                 )
                 await self.session.flush()
             else:
@@ -155,30 +164,34 @@ class SqlPlanningRepository:
                 )
                 if event is None:
                     raise LookupError("Событие удалено")
+            slots_by_role: dict[int, dict[int, EventRoleSlotRecord]] = {}
+            for stored_slot in await self.session.scalars(
+                select(EventRoleSlotRecord)
+                .where(EventRoleSlotRecord.event_id == event.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            ):
+                slots_by_role.setdefault(stored_slot.ministry_role_id, {})[
+                    stored_slot.slot_number
+                ] = stored_slot
             for assignment in planned.assignments:
                 await require_role_eligible(
                     self.session, assignment.user_ministry_role_id, event.event_kind
                 )
-                slot = await self.session.scalar(
-                    select(EventRoleSlotRecord)
-                    .where(
-                        EventRoleSlotRecord.event_id == event.id,
-                        EventRoleSlotRecord.ministry_role_id == assignment.ministry_role_id,
-                    )
-                    .order_by(EventRoleSlotRecord.slot_number)
-                )
-                if slot is not None and slot.user_ministry_role_id not in (
-                    None,
+                role_slots = slots_by_role.setdefault(assignment.ministry_role_id, {})
+                number = choose_assignment_slot(
+                    {number: slot.user_ministry_role_id for number, slot in role_slots.items()},
                     assignment.user_ministry_role_id,
-                ):
-                    raise ValueError("Роль уже занята. Черновик не применён")
+                )
+                slot = role_slots.get(number)
                 if slot is None:
                     slot = EventRoleSlotRecord(
                         event_id=event.id,
                         ministry_role_id=assignment.ministry_role_id,
-                        slot_number=1,
+                        slot_number=number,
                     )
                     self.session.add(slot)
+                    role_slots[number] = slot
                 changed = slot.user_ministry_role_id != assignment.user_ministry_role_id
                 slot.user_ministry_role_id = assignment.user_ministry_role_id
                 if changed:
@@ -203,6 +216,14 @@ class SqlPlanningRepository:
                                 deduplication_key=key,
                             )
                         )
+            for role_id in planned.extra_role_ids:
+                role_slots = slots_by_role.setdefault(role_id, {})
+                number = max(role_slots, default=0) + 1
+                slot = EventRoleSlotRecord(
+                    event_id=event.id, ministry_role_id=role_id, slot_number=number
+                )
+                self.session.add(slot)
+                role_slots[number] = slot
             await self.session.flush()
             await queue_event_reminders(self.session, event.id)
             ids.append(event.id)
